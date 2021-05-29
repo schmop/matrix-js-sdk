@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+import { ISignatures } from "../@types/signed";
+import { DeviceInfo } from "./deviceinfo";
+
 export interface IKeyBackupSession {
     first_message_index: number;
     forwarded_count: number;
@@ -27,4 +30,41 @@ export interface IKeyBackupSession {
 
 export interface IKeyBackupRoomSessions {
     [sessionId: string]: IKeyBackupSession;
+}
+
+export interface IKeyBackupVersion {
+    algorithm: string;
+    auth_data: {
+        public_key: string;
+        signatures: ISignatures;
+    };
+    count: number;
+    etag: string;
+    version: string; // number contained within
+}
+
+// TODO: Verify types
+export interface IKeyBackupTrustInfo {
+    /**
+     * is the backup trusted, true if there is a sig that is valid & from a trusted device
+     */
+    usable: boolean[];
+    sigs: {
+        valid: boolean[];
+        device: DeviceInfo[];
+    }[];
+}
+
+export interface IKeyBackupPrepareOpts {
+    secureSecretStorage: boolean;
+}
+
+export interface IKeyBackupRestoreResult {
+    total: number;
+    imported: number;
+}
+
+export interface IKeyBackupRestoreOpts {
+    cacheCompleteCallback?: () => void;
+    progressCallback?: ({stage: string}) => void;
 }

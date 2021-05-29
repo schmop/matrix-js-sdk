@@ -1518,8 +1518,7 @@ wrapCryptoFuncs(MatrixClient, [
  * @param {string} algorithm the algorithm used by the key
  * @param {object} opts the options for the algorithm.  The properties used
  *     depend on the algorithm given.
- * @param {string} [keyName] the name of the key.  If not given, a random
- *     name will be generated.
+ * @param {string} [keyName] the name of the key.  If not given, a random name will be generated.
  *
  * @return {object} An object with:
  *     keyId: {string} the ID of the key

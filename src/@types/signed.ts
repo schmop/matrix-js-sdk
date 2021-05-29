@@ -14,16 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { ISecretStorageKeyInfo } from "../matrix";
-
-export interface IDehydratedDevice {
-    device_id: string;
-    device_data: ISecretStorageKeyInfo & {
-        algorithm: string;
-        account: string; // pickle
+export interface ISignatures {
+    [entity: string]: {
+        [keyId: string]: string;
     };
-}
-
-export interface IDehydratedDeviceKeyInfo {
-    passphrase: string;
 }

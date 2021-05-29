@@ -32,6 +32,7 @@ import { createNewMatrixCall, MatrixCall } from "./webrtc/call";
 import {CallEventHandler} from './webrtc/callEventHandler';
 import * as utils from './utils';
 import {sleep} from './utils';
+import { Group } from "./models/group";
 import {
     MatrixError,
     PREFIX_MEDIA_R0,
@@ -53,13 +54,19 @@ import {encodeBase64, decodeBase64} from "./crypto/olmlib";
 import { User } from "./models/user";
 import {AutoDiscovery} from "./autodiscovery";
 import {DEHYDRATION_ALGORITHM} from "./crypto/dehydration";
-import { IKeyBackupRoomSessions, IKeyBackupSession } from "./@types/keybackup";
+import {
+    IKeyBackupPrepareOpts, IKeyBackupRestoreOpts, IKeyBackupRestoreResult,
+    IKeyBackupRoomSessions,
+    IKeyBackupSession,
+    IKeyBackupTrustInfo,
+    IKeyBackupVersion
+} from "./crypto/keybackup";
 import { PkDecryption } from "olm";
 import { IIdentityProvider } from "../../matrix-react-sdk/src/Login";
 import { IIdentityServerProvider } from "./@types/IIdentityServerProvider";
 import type Request from "request";
 import {MatrixScheduler} from "./scheduler";
-import { ICryptoCallbacks } from "./matrix";
+import { ICryptoCallbacks, IDeviceTrustLevel, ISecretStorageKeyInfo } from "./matrix";
 import {MemoryCryptoStore} from "./crypto/store/memory-crypto-store";
 import {LocalStorageCryptoStore} from "./crypto/store/localStorage-crypto-store";
 import {IndexedDBCryptoStore} from "./crypto/store/indexeddb-crypto-store";
@@ -67,14 +74,26 @@ import {MemoryStore} from "./store/memory";
 import {LocalIndexedDBStoreBackend} from "./store/indexeddb-local-backend";
 import {RemoteIndexedDBStoreBackend} from "./store/indexeddb-remote-backend";
 import { SessionState } from "http2";
-import { IDehydratedDevice, IDehydratedDeviceKeyInfo } from "./@types/dehydration";
+import { IDehydratedDevice, IDehydratedDeviceKeyInfo } from "./crypto/dehydration";
 import { SyncState } from "./sync.api";
 import { EventTimelineSet } from "./models/event-timeline-set";
 import { VerificationRequest } from "./crypto/verification/request/VerificationRequest";
+import { Base as Verification } from "./crypto/verification/Base";
+import {
+    CrossSigningKey,
+    IAddSecretStorageKeyOpts,
+    ICreateSecretStorageOpts,
+    IEncryptedEventInfo, IImportOpts, IImportRoomKeysOpts,
+    IRecoveryKey, ISecretStorageKey
+} from "./crypto/api";
+import { CrossSigningInfo, UserTrustLevel } from "./crypto/CrossSigning";
+import { Room } from "./models/Room";
 
 export type Store = StubStore | MemoryStore | LocalIndexedDBStoreBackend | RemoteIndexedDBStoreBackend;
 
 export type CryptoStore = MemoryCryptoStore | LocalStorageCryptoStore | IndexedDBCryptoStore;
+
+export type Callback = (err: Error | any | null, data: any) => void;
 
 const SCROLLBACK_DELAY_MS = 3000;
 export const CRYPTO_ENABLED: boolean = isCryptoAvailable();
@@ -271,6 +290,8 @@ export interface IMatrixClientCreateOpts extends ICreateClientOpts {
  * as it specifies 'sensible' defaults for these modules.
  */
 export class MatrixClient extends EventEmitter {
+    public static readonly RESTORE_BACKUP_ERROR_BAD_KEY = 'RESTORE_BACKUP_ERROR_BAD_KEY';
+
     public reEmitter = new ReEmitter(this);
     public olmVersion: number = null; // populated after initCrypto
     public usingExternalCrypto = false;
@@ -1140,6 +1161,1272 @@ export class MatrixClient extends EventEmitter {
             throw new Error("End-to-end encryption disabled");
         }
         return this.crypto.requestVerificationDM(userId, roomId);
+    }
+
+    /**
+     * Finds a DM verification request that is already in progress for the given room id
+     *
+     * @param {string} roomId the room to use for verification
+     *
+     * @returns {module:crypto/verification/request/VerificationRequest?} the VerificationRequest that is in progress, if any
+     */
+    public findVerificationRequestDMInProgress(roomId: string): VerificationRequest {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.findVerificationRequestDMInProgress(roomId);
+    }
+
+    /**
+     * Returns all to-device verification requests that are already in progress for the given user id
+     *
+     * @param {string} userId the ID of the user to query
+     *
+     * @returns {module:crypto/verification/request/VerificationRequest[]} the VerificationRequests that are in progress
+     */
+    public getVerificationRequestsToDeviceInProgress(userId: string): VerificationRequest[] {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getVerificationRequestsToDeviceInProgress(userId);
+    }
+
+    /**
+     * Request a key verification from another user.
+     *
+     * @param {string} userId the user to request verification with
+     * @param {Array} devices array of device IDs to send requests to.  Defaults to
+     *    all devices owned by the user
+     *
+     * @returns {Promise<module:crypto/verification/request/VerificationRequest>} resolves to a VerificationRequest
+     *    when the request has been sent to the other party.
+     */
+    public requestVerification(userId: string, devices: string[]): Promise<VerificationRequest> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.requestVerification(userId, devices);
+    }
+
+    /**
+     * Begin a key verification.
+     *
+     * @param {string} method the verification method to use
+     * @param {string} userId the user to verify keys with
+     * @param {string} deviceId the device to verify
+     *
+     * @returns {Verification} a verification object
+     */
+    public beginKeyVerification(method: string, userId: string, deviceId: string): Verification {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.beginKeyVerification(method, userId, deviceId);
+    }
+
+    /**
+     * Set the global override for whether the client should ever send encrypted
+     * messages to unverified devices.  This provides the default for rooms which
+     * do not specify a value.
+     *
+     * @param {boolean} value whether to blacklist all unverified devices by default
+     */
+    public setGlobalBlacklistUnverifiedDevices(value: boolean) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.setGlobalBlacklistUnverifiedDevices(value);
+    }
+
+    /**
+     * @return {boolean} whether to blacklist all unverified devices by default
+     */
+    public getGlobalBlacklistUnverifiedDevices(): boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getGlobalBlacklistUnverifiedDevices();
+    }
+
+    /**
+     * Set whether sendMessage in a room with unknown and unverified devices
+     * should throw an error and not send them message. This has 'Global' for
+     * symmetry with setGlobalBlacklistUnverifiedDevices but there is currently
+     * no room-level equivalent for this setting.
+     *
+     * This API is currently UNSTABLE and may change or be removed without notice.
+     *
+     * @param {boolean} value whether error on unknown devices
+     */
+    public setGlobalErrorOnUnknownDevices(value: boolean) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.setGlobalErrorOnUnknownDevices(value);
+    }
+
+    /**
+     * @return {boolean} whether to error on unknown devices
+     *
+     * This API is currently UNSTABLE and may change or be removed without notice.
+     */
+    public getGlobalErrorOnUnknownDevices(): boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getGlobalErrorOnUnknownDevices();
+    }
+
+    /**
+     * Get the user's cross-signing key ID.
+     *
+     * The cross-signing API is currently UNSTABLE and may change without notice.
+     *
+     * @param {CrossSigningKey} [type=master] The type of key to get the ID of.  One of
+     *     "master", "self_signing", or "user_signing".  Defaults to "master".
+     *
+     * @returns {string} the key ID
+     */
+    public getCrossSigningId(type = CrossSigningKey.Master): string {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getCrossSigningId(type);
+    }
+
+    /**
+     * Get the cross signing information for a given user.
+     *
+     * The cross-signing API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} userId the user ID to get the cross-signing info for.
+     *
+     * @returns {CrossSigningInfo} the cross signing information for the user.
+     */
+    public getStoredCrossSigningForUser(userId: string): CrossSigningInfo {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getStoredCrossSigningForUser(userId);
+    }
+
+    /**
+     * Check whether a given user is trusted.
+     *
+     * The cross-signing API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} userId The ID of the user to check.
+     *
+     * @returns {UserTrustLevel}
+     */
+    public checkUserTrust(userId: string): UserTrustLevel {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.checkUserTrust(userId);
+    }
+
+    /**
+     * Check whether a given device is trusted.
+     *
+     * The cross-signing API is currently UNSTABLE and may change without notice.
+     *
+     * @function module:client~MatrixClient#checkDeviceTrust
+     * @param {string} userId The ID of the user whose devices is to be checked.
+     * @param {string} deviceId The ID of the device to check
+     *
+     * @returns {IDeviceTrustLevel}
+     */
+    public checkDeviceTrust(userId: string, deviceId: string): IDeviceTrustLevel {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.checkDeviceTrust(userId, deviceId);
+    }
+
+    /**
+     * Check the copy of our cross-signing key that we have in the device list and
+     * see if we can get the private key. If so, mark it as trusted.
+     */
+    public checkOwnCrossSigningTrust() {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.checkOwnCrossSigningTrust();
+    }
+
+    /**
+     * Checks that a given cross-signing private key matches a given public key.
+     * This can be used by the getCrossSigningKey callback to verify that the
+     * private key it is about to supply is the one that was requested.
+     * @param {Uint8Array} privateKey The private key
+     * @param {string} expectedPublicKey The public key
+     * @returns {boolean} true if the key matches, otherwise false
+     */
+    public checkCrossSigningPrivateKey(privateKey: Uint8Array, expectedPublicKey: string): boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.checkCrossSigningPrivateKey(privateKey, expectedPublicKey);
+    }
+
+    public legacyDeviceVerification(userId: string, deviceId: string, method: string): Promise<VerificationRequest> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.legacyDeviceVerification(userId, deviceId, method);
+    }
+
+    /**
+     * Perform any background tasks that can be done before a message is ready to
+     * send, in order to speed up sending of the message.
+     * @param {module:models/room} room the room the event is in
+     */
+    public prepareToEncrypt(room: Room) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.prepareToEncrypt(room);
+    }
+
+    /**
+     * Checks whether cross signing:
+     * - is enabled on this account and trusted by this device
+     * - has private keys either cached locally or stored in secret storage
+     *
+     * If this function returns false, bootstrapCrossSigning() can be used
+     * to fix things such that it returns true. That is to say, after
+     * bootstrapCrossSigning() completes successfully, this function should
+     * return true.
+     * @return {bool} True if cross-signing is ready to be used on this device
+     */
+    public isCrossSigningReady(): boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.isCrossSigningReady();
+    }
+
+    /**
+     * Bootstrap cross-signing by creating keys if needed. If everything is already
+     * set up, then no changes are made, so this is safe to run to ensure
+     * cross-signing is ready for use.
+     *
+     * This function:
+     * - creates new cross-signing keys if they are not found locally cached nor in
+     *   secret storage (if it has been setup)
+     *
+     * The cross-signing API is currently UNSTABLE and may change without notice.
+     *
+     * @param {function} opts.authUploadDeviceSigningKeys Function
+     * called to await an interactive auth flow when uploading device signing keys.
+     * @param {bool} [opts.setupNewCrossSigning] Optional. Reset even if keys
+     * already exist.
+     * Args:
+     *     {function} A function that makes the request requiring auth. Receives the
+     *     auth data as an object. Can be called multiple times, first with an empty
+     *     authDict, to obtain the flows.
+     */
+    public bootstrapCrossSigning(opts: {
+        authUploadDeviceSigningKeys: (makeRequest: (authData: any) => void) => Promise<void>,
+        setupNewCrossSigning?: boolean,
+    }) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.bootstrapCrossSigning(opts);
+    }
+    /**
+     * Whether to trust a others users signatures of their devices.
+     * If false, devices will only be considered 'verified' if we have
+     * verified that device individually (effectively disabling cross-signing).
+     *
+     * Default: true
+     *
+     * @return {bool} True if trusting cross-signed devices
+     */
+    public getCryptoTrustCrossSignedDevices() : boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getCryptoTrustCrossSignedDevices();
+    }
+
+    /**
+     * See getCryptoTrustCrossSignedDevices
+
+     * This may be set before initCrypto() is called to ensure no races occur.
+     *
+     * @param {bool} val True to trust cross-signed devices
+     */
+    public setCryptoTrustCrossSignedDevices(val: boolean) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.setCryptoTrustCrossSignedDevices(val);
+    }
+
+    /**
+     * Counts the number of end to end session keys that are waiting to be backed up
+     * @returns {Promise<int>} Resolves to the number of sessions requiring backup
+     */
+    public countSessionsNeedingBackup(): Promise<number> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.countSessionsNeedingBackup();
+    }
+
+    /**
+     * Get information about the encryption of an event
+     *
+     * @param {module:models/event.MatrixEvent} event event to be checked
+     * @returns {IEncryptedEventInfo} The event information.
+     */
+    public getEventEncryptionInfo(event: MatrixEvent): IEncryptedEventInfo {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getEventEncryptionInfo(event);
+    }
+
+    /**
+     * Create a recovery key from a user-supplied passphrase.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} password Passphrase string that can be entered by the user
+     *     when restoring the backup as an alternative to entering the recovery key.
+     *     Optional.
+     * @returns {Promise<Object>} Object with public key metadata, encoded private
+     *     recovery key which should be disposed of after displaying to the user,
+     *     and raw private key to avoid round tripping if needed.
+     */
+    public createRecoveryKeyFromPassphrase(password: string): Promise<IRecoveryKey> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.createRecoveryKeyFromPassphrase(password);
+    }
+
+    /**
+     * Checks whether secret storage:
+     * - is enabled on this account
+     * - is storing cross-signing private keys
+     * - is storing session backup key (if enabled)
+     *
+     * If this function returns false, bootstrapSecretStorage() can be used
+     * to fix things such that it returns true. That is to say, after
+     * bootstrapSecretStorage() completes successfully, this function should
+     * return true.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @return {bool} True if secret storage is ready to be used on this device
+     */
+    public isSecretStorageReady(): boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.isSecretStorageReady();
+    }
+
+    /**
+     * Bootstrap Secure Secret Storage if needed by creating a default key. If everything is
+     * already set up, then no changes are made, so this is safe to run to ensure secret
+     * storage is ready for use.
+     *
+     * This function
+     * - creates a new Secure Secret Storage key if no default key exists
+     *   - if a key backup exists, it is migrated to store the key in the Secret
+     *     Storage
+     * - creates a backup if none exists, and one is requested
+     * - migrates Secure Secret Storage to use the latest algorithm, if an outdated
+     *   algorithm is found
+     *
+     * @param opts
+     */
+    public bootstrapSecretStorage(opts: ICreateSecretStorageOpts): Promise<void> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.bootstrapSecretStorage(opts);
+    }
+
+    /**
+     * Add a key for encrypting secrets.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} algorithm the algorithm used by the key
+     * @param {object} opts the options for the algorithm.  The properties used
+     *     depend on the algorithm given.
+     * @param {string} [keyName] the name of the key.  If not given, a random name will be generated.
+     *
+     * @return {object} An object with:
+     *     keyId: {string} the ID of the key
+     *     keyInfo: {object} details about the key (iv, mac, passphrase)
+     */
+    public addSecretStorageKey(algorithm: string, opts: IAddSecretStorageKeyOpts, keyName?: string): ISecretStorageKey {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.addSecretStorageKey(algorithm, opts, keyName);
+    }
+
+    /**
+     * Check whether we have a key with a given ID.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} [keyId = default key's ID] The ID of the key to check
+     *     for. Defaults to the default key ID if not provided.
+     * @return {boolean} Whether we have the key.
+     */
+    public hasSecretStorageKey(keyId?:string): boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.hasSecretStorageKey(keyId);
+    }
+
+    /**
+     * Store an encrypted secret on the server.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} name The name of the secret
+     * @param {string} secret The secret contents.
+     * @param {Array} keys The IDs of the keys to use to encrypt the secret or null/undefined
+     *     to use the default (will throw if no default key is set).
+     */
+    public storeSecret(name: string, secret: string, keys?: string[]) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.storeSecret(name, secret, keys);
+    }
+
+    /**
+     * Get a secret from storage.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} name the name of the secret
+     *
+     * @return {string} the contents of the secret
+     */
+    public getSecret(name: string): string {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getSecret(name);
+    }
+
+    /**
+     * Check if a secret is stored on the server.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} name the name of the secret
+     * @param {boolean} checkKey check if the secret is encrypted by a trusted
+     *     key
+     *
+     * @return {object?} map of key name to key info the secret is encrypted
+     *     with, or null if it is not present or not encrypted with a trusted
+     *     key
+     */
+    public isSecretStored(name: string, checkKey: boolean): Record<string, ISecretStorageKeyInfo> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.isSecretStored(name, checkKey);
+    }
+
+    /**
+     * Request a secret from another device.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} name the name of the secret to request
+     * @param {string[]} devices the devices to request the secret from
+     *
+     * @return {string} the contents of the secret
+     */
+    public requestSecret(name: string, devices: string[]): string {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.requestSecret(name, devices);
+    }
+
+    /**
+     * Get the current default key ID for encrypting secrets.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @return {string} The default key ID or null if no default key ID is set
+     */
+    public getDefaultSecretStorageKeyId(): string {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.getDefaultSecretStorageKeyId();
+    }
+
+    /**
+     * Set the current default key ID for encrypting secrets.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} keyId The new default key ID
+     */
+    public setDefaultSecretStorageKeyId(keyId: string) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.setDefaultSecretStorageKeyId(keyId);
+    }
+
+    /**
+     * Checks that a given secret storage private key matches a given public key.
+     * This can be used by the getSecretStorageKey callback to verify that the
+     * private key it is about to supply is the one that was requested.
+     *
+     * The Secure Secret Storage API is currently UNSTABLE and may change without notice.
+     *
+     * @param {Uint8Array} privateKey The private key
+     * @param {string} expectedPublicKey The public key
+     * @returns {boolean} true if the key matches, otherwise false
+     */
+    public checkSecretStoragePrivateKey(privateKey: Uint8Array, expectedPublicKey: string): boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.checkSecretStoragePrivateKey(privateKey, expectedPublicKey);
+    }
+
+    /**
+     * Get e2e information on the device that sent an event
+     *
+     * @param {MatrixEvent} event event to be checked
+     *
+     * @return {Promise<module:crypto/deviceinfo?>}
+     */
+    public getEventSenderDeviceInfo(event: MatrixEvent): Promise<DeviceInfo> {
+        if (!this.crypto) {
+            return null;
+        }
+        return this.crypto.getEventSenderDeviceInfo(event);
+    }
+
+    /**
+     * Check if the sender of an event is verified
+     *
+     * @param {MatrixEvent} event event to be checked
+     *
+     * @return {boolean} true if the sender of this event has been verified using
+     * {@link module:client~MatrixClient#setDeviceVerified|setDeviceVerified}.
+     */
+    public async isEventSenderVerified(event: MatrixEvent): Promise<boolean> {
+        const device = await this.getEventSenderDeviceInfo(event);
+        if (!device) {
+            return false;
+        }
+        return device.isVerified();
+    }
+
+    /**
+     * Cancel a room key request for this event if one is ongoing and resend the
+     * request.
+     * @param  {MatrixEvent} event event of which to cancel and resend the room
+     *                            key request.
+     * @return {Promise} A promise that will resolve when the key request is queued
+     */
+    public cancelAndResendEventRoomKeyRequest(event: MatrixEvent): Promise<void> {
+        return event.cancelAndResendKeyRequest(this.crypto, this.getUserId());
+    }
+
+    /**
+     * Enable end-to-end encryption for a room. This does not modify room state.
+     * Any messages sent before the returned promise resolves will be sent unencrypted.
+     * @param {string} roomId The room ID to enable encryption in.
+     * @param {object} config The encryption config for the room.
+     * @return {Promise} A promise that will resolve when encryption is set up.
+     */
+    public setRoomEncryption(roomId: string, config: any): Promise<void> {
+        if (!this.crypto) {
+            throw new Error("End-to-End encryption disabled");
+        }
+        return this.crypto.setRoomEncryption(roomId, config);
+    }
+
+    /**
+     * Whether encryption is enabled for a room.
+     * @param {string} roomId the room id to query.
+     * @return {bool} whether encryption is enabled.
+     */
+    public isRoomEncrypted(roomId: string): boolean {
+        const room = this.getRoom(roomId);
+        if (!room) {
+            // we don't know about this room, so can't determine if it should be
+            // encrypted. Let's assume not.
+            return false;
+        }
+
+        // if there is an 'm.room.encryption' event in this room, it should be
+        // encrypted (independently of whether we actually support encryption)
+        const ev = room.currentState.getStateEvents("m.room.encryption", "");
+        if (ev) {
+            return true;
+        }
+
+        // we don't have an m.room.encrypted event, but that might be because
+        // the server is hiding it from us. Check the store to see if it was
+        // previously encrypted.
+        return this.roomList.isRoomEncrypted(roomId);
+    }
+
+    /**
+     * Forces the current outbound group session to be discarded such
+     * that another one will be created next time an event is sent.
+     *
+     * @param {string} roomId The ID of the room to discard the session for
+     *
+     * This should not normally be necessary.
+     */
+    public forceDiscardSession(roomId: string) {
+        if (!this.crypto) {
+            throw new Error("End-to-End encryption disabled");
+        }
+        this.crypto.forceDiscardSession(roomId);
+    }
+
+    /**
+     * Get a list containing all of the room keys
+     *
+     * This should be encrypted before returning it to the user.
+     *
+     * @return {Promise} a promise which resolves to a list of
+     *    session export objects
+     */
+    public exportRoomKeys(): Promise<any[]> { // TODO: Types
+        if (!this.crypto) {
+            return Promise.reject(new Error("End-to-end encryption disabled"));
+        }
+        return this.crypto.exportRoomKeys();
+    }
+
+    /**
+     * Import a list of room keys previously exported by exportRoomKeys
+     *
+     * @param {Object[]} keys a list of session export objects
+     * @param {Object} opts
+     * @param {Function} opts.progressCallback called with an object that has a "stage" param
+     *
+     * @return {Promise} a promise which resolves when the keys
+     *    have been imported
+     */
+    public importRoomKeys(keys: any[], opts: IImportRoomKeysOpts): Promise<void> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        return this.crypto.importRoomKeys(keys, opts);
+    }
+
+    /**
+     * Force a re-check of the local key backup status against
+     * what's on the server.
+     *
+     * @returns {Object} Object with backup info (as returned by
+     *     getKeyBackupVersion) in backupInfo and
+     *     trust information (as returned by isKeyBackupTrusted)
+     *     in trustInfo.
+     */
+    public checkKeyBackup(): IKeyBackupVersion {
+        return this.crypto.checkKeyBackup();
+    }
+
+    /**
+     * Get information about the current key backup.
+     * @returns {Promise} Information object from API or null
+     */
+    public getKeyBackupVersion(): Promise<IKeyBackupVersion> {
+        return this.http.authedRequest(
+            undefined, "GET", "/room_keys/version", undefined, undefined,
+            { prefix: PREFIX_UNSTABLE },
+        ).then((res) => {
+            if (res.algorithm !== olmlib.MEGOLM_BACKUP_ALGORITHM) {
+                const err = "Unknown backup algorithm: " + res.algorithm;
+                return Promise.reject(err);
+            } else if (!(typeof res.auth_data === "object")
+                || !res.auth_data.public_key) {
+                const err = "Invalid backup data returned";
+                return Promise.reject(err);
+            } else {
+                return res;
+            }
+        }).catch((e) => {
+            if (e.errcode === 'M_NOT_FOUND') {
+                return null;
+            } else {
+                throw e;
+            }
+        });
+    }
+
+    /**
+     * @param {object} info key backup info dict from getKeyBackupVersion()
+     * @return {object} {
+     *     usable: [bool], // is the backup trusted, true iff there is a sig that is valid & from a trusted device
+     *     sigs: [
+     *         valid: [bool],
+     *         device: [DeviceInfo],
+     *     ]
+     * }
+     */
+    public isKeyBackupTrusted(info: IKeyBackupVersion): IKeyBackupTrustInfo {
+        return this.crypto.isKeyBackupTrusted(info);
+    }
+
+    /**
+     * @returns {bool} true if the client is configured to back up keys to
+     *     the server, otherwise false. If we haven't completed a successful check
+     *     of key backup status yet, returns null.
+     */
+    public getKeyBackupEnabled(): boolean {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        // XXX: Private member access
+        if (!this.crypto._checkedForBackup) {
+            return null;
+        }
+        return Boolean(this.crypto.backupKey);
+    }
+
+    /**
+     * Enable backing up of keys, using data previously returned from
+     * getKeyBackupVersion.
+     *
+     * @param {object} info Backup information object as returned by getKeyBackupVersion
+     */
+    public enableKeyBackup(info: IKeyBackupVersion) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        this.crypto.backupInfo = info;
+        if (this.crypto.backupKey) this.crypto.backupKey.free();
+        this.crypto.backupKey = new global.Olm.PkEncryption();
+        this.crypto.backupKey.set_recipient_key(info.auth_data.public_key);
+
+        this.emit('crypto.keyBackupStatus', true);
+
+        // There may be keys left over from a partially completed backup, so
+        // schedule a send to check.
+        this.crypto.scheduleKeyBackupSend();
+    }
+
+    /**
+     * Disable backing up of keys.
+     */
+    public disableKeyBackup() {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        this.crypto.backupInfo = null;
+        if (this.crypto.backupKey) this.crypto.backupKey.free();
+        this.crypto.backupKey = null;
+
+        this.emit('crypto.keyBackupStatus', false);
+    }
+
+    /**
+     * Set up the data required to create a new backup version.  The backup version
+     * will not be created and enabled until createKeyBackupVersion is called.
+     *
+     * @param {string} password Passphrase string that can be entered by the user
+     *     when restoring the backup as an alternative to entering the recovery key.
+     *     Optional.
+     * @param {boolean} [opts.secureSecretStorage = false] Whether to use Secure
+     *     Secret Storage to store the key encrypting key backups.
+     *     Optional, defaults to false.
+     *
+     * @returns {Promise<object>} Object that can be passed to createKeyBackupVersion and
+     *     additionally has a 'recovery_key' member with the user-facing recovery key string.
+     */
+    // TODO: Verify types
+    public async prepareKeyBackupVersion(password: string, opts: IKeyBackupPrepareOpts = {secureSecretStorage: false}): Promise<IKeyBackupVersion> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        const { keyInfo, encodedPrivateKey, privateKey } =
+            await this.createRecoveryKeyFromPassphrase(password);
+
+        if (opts.secureSecretStorage) {
+            await this.storeSecret("m.megolm_backup.v1", encodeBase64(privateKey));
+            logger.info("Key backup private key stored in secret storage");
+        }
+
+        // Reshape objects into form expected for key backup
+        const authData: any = { // TODO
+            public_key: keyInfo.pubkey,
+        };
+        if (keyInfo.passphrase) {
+            authData.private_key_salt = keyInfo.passphrase.salt;
+            authData.private_key_iterations = keyInfo.passphrase.iterations;
+        }
+        return {
+            algorithm: olmlib.MEGOLM_BACKUP_ALGORITHM,
+            auth_data: authData,
+            recovery_key: encodedPrivateKey,
+        } as any; // TODO
+    }
+
+    /**
+     * Check whether the key backup private key is stored in secret storage.
+     * @return {Promise<object?>} map of key name to key info the secret is
+     *     encrypted with, or null if it is not present or not encrypted with a
+     *     trusted key
+     */
+    public isKeyBackupKeyStored(): Promise<Record<string, ISecretStorageKeyInfo>> {
+        return Promise.resolve(this.isSecretStored("m.megolm_backup.v1", false /* checkKey */));
+    }
+
+    /**
+     * Create a new key backup version and enable it, using the information return
+     * from prepareKeyBackupVersion.
+     *
+     * @param {object} info Info object from prepareKeyBackupVersion
+     * @returns {Promise<object>} Object with 'version' param indicating the version created
+     */
+    // TODO: Fix types
+    public async createKeyBackupVersion(info: IKeyBackupVersion): Promise<IKeyBackupVersion> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        const data = {
+            algorithm: info.algorithm,
+            auth_data: info.auth_data,
+        };
+
+        // Sign the backup auth data with the device key for backwards compat with
+        // older devices with cross-signing. This can probably go away very soon in
+        // favour of just signing with the cross-singing master key.
+        // XXX: Private member access
+        await this.crypto._signObject(data.auth_data);
+
+        if (
+            this.cryptoCallbacks.getCrossSigningKey &&
+            // XXX: Private member access
+            this.crypto._crossSigningInfo.getId()
+        ) {
+            // now also sign the auth data with the cross-signing master key
+            // we check for the callback explicitly here because we still want to be able
+            // to create an un-cross-signed key backup if there is a cross-signing key but
+            // no callback supplied.
+            // XXX: Private member access
+            await this.crypto._crossSigningInfo.signObject(data.auth_data, "master");
+        }
+
+        const res = await this.http.authedRequest(
+            undefined, "POST", "/room_keys/version", undefined, data,
+            { prefix: PREFIX_UNSTABLE },
+        );
+
+        // We could assume everything's okay and enable directly, but this ensures
+        // we run the same signature verification that will be used for future
+        // sessions.
+        await this.checkKeyBackup();
+        if (!this.getKeyBackupEnabled()) {
+            logger.error("Key backup not usable even though we just created it");
+        }
+
+        return res;
+    }
+
+    public deleteKeyBackupVersion(version: string): Promise<void> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        // If we're currently backing up to this backup... stop.
+        // (We start using it automatically in createKeyBackupVersion
+        // so this is symmetrical).
+        if (this.crypto.backupInfo && this.crypto.backupInfo.version === version) {
+            this.disableKeyBackup();
+        }
+
+        const path = utils.encodeUri("/room_keys/version/$version", {
+            $version: version,
+        });
+
+        return this.http.authedRequest(
+            undefined, "DELETE", path, undefined, undefined,
+            { prefix: PREFIX_UNSTABLE },
+        );
+    }
+
+    private makeKeyBackupPath(roomId: string, sessionId: string, version: string): {path: string, queryData: any} {
+        let path;
+        if (sessionId !== undefined) {
+            path = utils.encodeUri("/room_keys/keys/$roomId/$sessionId", {
+                $roomId: roomId,
+                $sessionId: sessionId,
+            });
+        } else if (roomId !== undefined) {
+            path = utils.encodeUri("/room_keys/keys/$roomId", {
+                $roomId: roomId,
+            });
+        } else {
+            path = "/room_keys/keys";
+        }
+        const queryData = version === undefined ? undefined : { version: version };
+        return {
+            path: path,
+            queryData: queryData,
+        };
+    }
+
+    /**
+     * Back up session keys to the homeserver.
+     * @param {string} roomId ID of the room that the keys are for Optional.
+     * @param {string} sessionId ID of the session that the keys are for Optional.
+     * @param {integer} version backup version Optional.
+     * @param {object} data Object keys to send
+     * @return {Promise} a promise that will resolve when the keys
+     * are uploaded
+     */
+    // TODO: Verify types
+    public sendKeyBackup(roomId: string, sessionId: string, version: string, data: any): Promise<void> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        const path = this.makeKeyBackupPath(roomId, sessionId, version);
+        return this.http.authedRequest(
+            undefined, "PUT", path.path, path.queryData, data,
+            { prefix: PREFIX_UNSTABLE },
+        );
+    }
+
+    /**
+     * Marks all group sessions as needing to be backed up and schedules them to
+     * upload in the background as soon as possible.
+     */
+    public async scheduleAllGroupSessionsForBackup() {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        await this.crypto.scheduleAllGroupSessionsForBackup();
+    }
+
+    /**
+     * Marks all group sessions as needing to be backed up without scheduling
+     * them to upload in the background.
+     * @returns {Promise<int>} Resolves to the number of sessions requiring a backup.
+     */
+    public flagAllGroupSessionsForBackup(): Promise<number> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        return this.crypto.flagAllGroupSessionsForBackup();
+    }
+
+    public isValidRecoveryKey(recoveryKey: string): boolean {
+        try {
+            decodeRecoveryKey(recoveryKey);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * Get the raw key for a key backup from the password
+     * Used when migrating key backups into SSSS
+     *
+     * The cross-signing API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} password Passphrase
+     * @param {object} backupInfo Backup metadata from `checkKeyBackup`
+     * @return {Promise<Uint8Array>} key backup key
+     */
+    public keyBackupKeyFromPassword(password: string, backupInfo: IKeyBackupVersion): Promise<Uint8Array> {
+        return keyFromAuthData(backupInfo.auth_data, password);
+    }
+
+    /**
+     * Get the raw key for a key backup from the recovery key
+     * Used when migrating key backups into SSSS
+     *
+     * The cross-signing API is currently UNSTABLE and may change without notice.
+     *
+     * @param {string} recoveryKey The recovery key
+     * @return {Uint8Array} key backup key
+     */
+    public keyBackupKeyFromRecoveryKey(recoveryKey: string): Uint8Array {
+        return decodeRecoveryKey(recoveryKey);
+    }
+
+    /**
+     * Restore from an existing key backup via a passphrase.
+     *
+     * @param {string} password Passphrase
+     * @param {string} [targetRoomId] Room ID to target a specific room.
+     * Restores all rooms if omitted.
+     * @param {string} [targetSessionId] Session ID to target a specific session.
+     * Restores all sessions if omitted.
+     * @param {object} backupInfo Backup metadata from `checkKeyBackup`
+     * @param {object} opts Optional params such as callbacks
+     * @return {Promise<object>} Status of restoration with `total` and `imported`
+     * key counts.
+     */
+    // TODO: Types
+    public async restoreKeyBackupWithPassword(password: string, targetRoomId: string, targetSessionId: string, backupInfo: IKeyBackupVersion, opts: IKeyBackupRestoreOpts): Promise<IKeyBackupRestoreResult> {
+        const privKey = await keyFromAuthData(backupInfo.auth_data, password);
+        return this.restoreKeyBackup(
+            privKey, targetRoomId, targetSessionId, backupInfo, opts,
+        );
+    }
+
+    /**
+     * Restore from an existing key backup via a private key stored in secret
+     * storage.
+     *
+     * @param {object} backupInfo Backup metadata from `checkKeyBackup`
+     * @param {string} [targetRoomId] Room ID to target a specific room.
+     * Restores all rooms if omitted.
+     * @param {string} [targetSessionId] Session ID to target a specific session.
+     * Restores all sessions if omitted.
+     * @param {object} opts Optional params such as callbacks
+     * @return {Promise<object>} Status of restoration with `total` and `imported`
+     * key counts.
+     */
+    // TODO: Types
+    public async restoreKeyBackupWithSecretStorage(backupInfo: IKeyBackupVersion, targetRoomId: string, targetSessionId: string, opts: IKeyBackupRestoreOpts): Promise<IKeyBackupRestoreResult> {
+        const storedKey = await this.getSecret("m.megolm_backup.v1");
+
+        // ensure that the key is in the right format.  If not, fix the key and
+        // store the fixed version
+        const fixedKey = fixBackupKey(storedKey);
+        if (fixedKey) {
+            const [keyId] = await this.crypto.getSecretStorageKey();
+            await this.storeSecret("m.megolm_backup.v1", fixedKey, [keyId]);
+        }
+
+        const privKey = decodeBase64(fixedKey || storedKey);
+        return this.restoreKeyBackup(
+            privKey, targetRoomId, targetSessionId, backupInfo, opts,
+        );
+    }
+
+    /**
+     * Restore from an existing key backup via an encoded recovery key.
+     *
+     * @param {string} recoveryKey Encoded recovery key
+     * @param {string} [targetRoomId] Room ID to target a specific room.
+     * Restores all rooms if omitted.
+     * @param {string} [targetSessionId] Session ID to target a specific session.
+     * Restores all sessions if omitted.
+     * @param {object} backupInfo Backup metadata from `checkKeyBackup`
+     * @param {object} opts Optional params such as callbacks
+
+     * @return {Promise<object>} Status of restoration with `total` and `imported`
+     * key counts.
+     */
+    // TODO: Types
+    public restoreKeyBackupWithRecoveryKey(recoveryKey: string, targetRoomId: string, targetSessionId: string, backupInfo: IKeyBackupVersion, opts: IKeyBackupRestoreOpts): Promise<IKeyBackupRestoreResult> {
+        const privKey = decodeRecoveryKey(recoveryKey);
+        return this.restoreKeyBackup(
+            privKey, targetRoomId, targetSessionId, backupInfo, opts,
+        );
+    }
+
+    // TODO: Types
+    public async restoreKeyBackupWithCache(targetRoomId: string, targetSessionId: string, backupInfo: IKeyBackupVersion, opts: IKeyBackupRestoreOpts): Promise<IKeyBackupRestoreResult> {
+        const privKey = await this.crypto.getSessionBackupPrivateKey();
+        if (!privKey) {
+            throw new Error("Couldn't get key");
+        }
+        return this.restoreKeyBackup(
+            privKey, targetRoomId, targetSessionId, backupInfo, opts,
+        );
+    }
+
+    private restoreKeyBackup(privKey: Uint8Array, targetRoomId: string, targetSessionId: string, backupInfo: IKeyBackupVersion, opts: IKeyBackupRestoreOpts): Promise<IKeyBackupRestoreResult> {
+        const {cacheCompleteCallback, progressCallback} = opts;
+
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+        let totalKeyCount = 0;
+        let keys = [];
+
+        const path = this.makeKeyBackupPath(
+            targetRoomId, targetSessionId, backupInfo.version,
+        );
+
+        const decryption = new global.Olm.PkDecryption();
+        let backupPubKey;
+        try {
+            backupPubKey = decryption.init_with_private_key(privKey);
+        } catch (e) {
+            decryption.free();
+            throw e;
+        }
+
+        // If the pubkey computed from the private data we've been given
+        // doesn't match the one in the auth_data, the user has entered
+        // a different recovery key / the wrong passphrase.
+        if (backupPubKey !== backupInfo.auth_data.public_key) {
+            return Promise.reject({ errcode: MatrixClient.RESTORE_BACKUP_ERROR_BAD_KEY });
+        }
+
+        // Cache the key, if possible.
+        // This is async.
+        this.crypto.storeSessionBackupPrivateKey(privKey)
+            .catch((e) => {
+                logger.warn("Error caching session backup key:", e);
+            }).then(cacheCompleteCallback);
+
+        if (progressCallback) {
+            progressCallback({
+                stage: "fetch",
+            });
+        }
+
+        return this.http.authedRequest(
+            undefined, "GET", path.path, path.queryData, undefined,
+            { prefix: PREFIX_UNSTABLE },
+        ).then((res) => {
+            if (res.rooms) {
+                // TODO: Types?
+                for (const [roomId, roomData] of Object.entries<any>(res.rooms)) {
+                    if (!roomData.sessions) continue;
+
+                    totalKeyCount += Object.keys(roomData.sessions).length;
+                    const roomKeys = keysFromRecoverySession(
+                        roomData.sessions, decryption, roomId,
+                    );
+                    for (const k of roomKeys) {
+                        k.room_id = roomId;
+                        keys.push(k);
+                    }
+                }
+            } else if (res.sessions) {
+                totalKeyCount = Object.keys(res.sessions).length;
+                keys = keysFromRecoverySession(
+                    res.sessions, decryption, targetRoomId,
+                );
+            } else {
+                totalKeyCount = 1;
+                try {
+                    const key = keyFromRecoverySession(res, decryption);
+                    key.room_id = targetRoomId;
+                    key.session_id = targetSessionId;
+                    keys.push(key);
+                } catch (e) {
+                    logger.log("Failed to decrypt megolm session from backup", e);
+                }
+            }
+
+            return this.importRoomKeys(keys, {
+                progressCallback,
+                untrusted: true,
+                source: "backup",
+            });
+        }).then(() => {
+            return this.crypto.setTrustedBackupPubKey(backupPubKey);
+        }).then(() => {
+            return { total: totalKeyCount, imported: keys.length };
+        }).finally(() => {
+            decryption.free();
+        });
+    }
+
+    public deleteKeysFromBackup(roomId: string, sessionId: string, version: string): Promise<void> {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        const path = this.makeKeyBackupPath(roomId, sessionId, version);
+        return this.http.authedRequest(
+            undefined, "DELETE", path.path, path.queryData, undefined,
+            { prefix: PREFIX_UNSTABLE },
+        );
+    }
+
+    /**
+     * Share shared-history decryption keys with the given users.
+     *
+     * @param {string} roomId the room for which keys should be shared.
+     * @param {array} userIds a list of users to share with.  The keys will be sent to
+     *     all of the user's current devices.
+     */
+    public async sendSharedHistoryKeys(roomId: string, userIds: string[]) {
+        if (!this.crypto) {
+            throw new Error("End-to-end encryption disabled");
+        }
+
+        const roomEncryption = this.roomList.getRoomEncryption(roomId);
+        if (!roomEncryption) {
+            // unknown room, or unencrypted room
+            logger.error("Unknown room.  Not sharing decryption keys");
+            return;
+        }
+
+        const deviceInfos = await this.crypto.downloadKeys(userIds);
+        const devicesByUser = {};
+        for (const [userId, devices] of Object.entries(deviceInfos)) {
+            devicesByUser[userId] = Object.values(devices);
+        }
+
+        // XXX: Private member access
+        const alg = this.crypto._getRoomDecryptor(roomId, roomEncryption.algorithm);
+        if (alg.sendSharedHistoryInboundSessions) {
+            await alg.sendSharedHistoryInboundSessions(devicesByUser);
+        } else {
+            logger.warn("Algorithm does not support sharing previous keys", roomEncryption.algorithm);
+        }
+    }
+
+    /**
+     * Get the group for the given group ID.
+     * This function will return a valid group for any group for which a Group event
+     * has been emitted.
+     * @param {string} groupId The group ID
+     * @return {Group} The Group or null if the group is not known or there is no data store.
+     */
+    public getGroup(groupId: string): Group {
+        return this.store.getGroup(groupId);
+    }
+
+    /**
+     * Retrieve all known groups.
+     * @return {Group[]} A list of groups, or an empty list if there is no data store.
+     */
+    public getGroups(): Group[] {
+        return this.store.getGroups();
+    }
+
+    /**
+     * Get the config for the media repository.
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves with an object containing the config.
+     */
+    public getMediaConfig(callback?: Callback): Promise<any> { // TODO: Types
+        return this.http.authedRequest(
+            callback, "GET", "/config", undefined, undefined, {
+                prefix: PREFIX_MEDIA_R0,
+            },
+        );
     }
 }
 
