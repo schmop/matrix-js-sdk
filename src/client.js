@@ -2567,10 +2567,8 @@ MatrixClient.prototype.isUserIgnored = function(userId) {
  * @param {boolean} opts.syncRoom True to do a room initial sync on the resulting
  * room. If false, the <strong>returned Room object will have no current state.
  * </strong> Default: true.
- * @param {boolean} opts.inviteSignUrl If the caller has a keypair 3pid invite,
- *                                     the signing URL is passed in this parameter.
- * @param {string[]} opts.viaServers The server names to try and join through in
- *                                   addition to those that are automatically chosen.
+ * @param {boolean} opts.inviteSignUrl If the caller has a keypair 3pid invite, the signing URL is passed in this parameter.
+ * @param {string[]} opts.viaServers The server names to try and join through in addition to those that are automatically chosen.
  * @param {module:client.callback} callback Optional.
  * @return {Promise} Resolves: Room object.
  * @return {module:http-api.MatrixError} Rejects: with an error response.
@@ -3198,9 +3196,7 @@ MatrixClient.prototype.sendStickerMessage = function(roomId, url, info, text, ca
          info: info,
          body: text,
     };
-    return this.sendEvent(
-        roomId, "m.sticker", content, callback, undefined,
-    );
+    return this.sendEvent(roomId, "m.sticker", content, callback, undefined);
 };
 
 /**

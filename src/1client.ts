@@ -19,81 +19,71 @@ limitations under the License.
  * @module client
  */
 
-import url from "url";
-import {EventEmitter} from "events";
-import {MatrixBaseApis} from "./base-apis";
-import {Filter} from "./filter";
-import {SyncApi} from "./sync";
-import {EventStatus, MatrixEvent} from "./models/event";
-import {EventTimeline} from "./models/event-timeline";
-import {SearchResult} from "./models/search-result";
-import {StubStore} from "./store/stub";
+import { EventEmitter } from "events";
+import { SyncApi } from "./sync";
+import { EventStatus, MatrixEvent } from "./models/event";
+import { StubStore } from "./store/stub";
 import { createNewMatrixCall, MatrixCall } from "./webrtc/call";
-import {CallEventHandler} from './webrtc/callEventHandler';
+import { CallEventHandler } from './webrtc/callEventHandler';
 import * as utils from './utils';
-import {sleep} from './utils';
 import { Group } from "./models/group";
-import {
-    MatrixError,
-    PREFIX_MEDIA_R0,
-    PREFIX_UNSTABLE,
-    retryNetworkOperation,
-} from "./http-api";
-import {getHttpUriForMxc} from "./content-repo";
-import * as ContentHelpers from "./content-helpers";
+import { PREFIX_MEDIA_R0, PREFIX_UNSTABLE, retryNetworkOperation, } from "./http-api";
 import * as olmlib from "./crypto/olmlib";
-import {ReEmitter} from './ReEmitter';
-import {RoomList} from './crypto/RoomList';
-import {logger} from './logger';
-import {Crypto, isCryptoAvailable, fixBackupKey, DeviceInfo} from './crypto';
-import {decodeRecoveryKey} from './crypto/recoverykey';
-import {keyFromAuthData} from './crypto/key_passphrase';
-import {randomString} from './randomstring';
-import {PushProcessor} from "./pushprocessor";
-import {encodeBase64, decodeBase64} from "./crypto/olmlib";
+import { decodeBase64, encodeBase64 } from "./crypto/olmlib";
+import { ReEmitter } from './ReEmitter';
+import { RoomList } from './crypto/RoomList';
+import { logger } from './logger';
+import { Crypto, DeviceInfo, fixBackupKey, isCryptoAvailable } from './crypto';
+import { decodeRecoveryKey } from './crypto/recoverykey';
+import { keyFromAuthData } from './crypto/key_passphrase';
+import { PushProcessor } from "./pushprocessor";
 import { User } from "./models/user";
-import {AutoDiscovery} from "./autodiscovery";
-import {DEHYDRATION_ALGORITHM} from "./crypto/dehydration";
+import { DEHYDRATION_ALGORITHM, IDehydratedDevice, IDehydratedDeviceKeyInfo } from "./crypto/dehydration";
 import {
-    IKeyBackupPrepareOpts, IKeyBackupRestoreOpts, IKeyBackupRestoreResult,
+    IKeyBackupPrepareOpts,
+    IKeyBackupRestoreOpts,
+    IKeyBackupRestoreResult,
     IKeyBackupRoomSessions,
     IKeyBackupSession,
     IKeyBackupTrustInfo,
     IKeyBackupVersion
 } from "./crypto/keybackup";
 import { PkDecryption } from "olm";
-import { IIdentityProvider } from "../../matrix-react-sdk/src/Login";
 import { IIdentityServerProvider } from "./@types/IIdentityServerProvider";
 import type Request from "request";
-import {MatrixScheduler} from "./scheduler";
+import { MatrixScheduler } from "./scheduler";
 import { ICryptoCallbacks, IDeviceTrustLevel, ISecretStorageKeyInfo } from "./matrix";
-import {MemoryCryptoStore} from "./crypto/store/memory-crypto-store";
-import {LocalStorageCryptoStore} from "./crypto/store/localStorage-crypto-store";
-import {IndexedDBCryptoStore} from "./crypto/store/indexeddb-crypto-store";
-import {MemoryStore} from "./store/memory";
-import {LocalIndexedDBStoreBackend} from "./store/indexeddb-local-backend";
-import {RemoteIndexedDBStoreBackend} from "./store/indexeddb-remote-backend";
-import { SessionState } from "http2";
-import { IDehydratedDevice, IDehydratedDeviceKeyInfo } from "./crypto/dehydration";
+import { MemoryCryptoStore } from "./crypto/store/memory-crypto-store";
+import { LocalStorageCryptoStore } from "./crypto/store/localStorage-crypto-store";
+import { IndexedDBCryptoStore } from "./crypto/store/indexeddb-crypto-store";
+import { MemoryStore } from "./store/memory";
+import { LocalIndexedDBStoreBackend } from "./store/indexeddb-local-backend";
+import { RemoteIndexedDBStoreBackend } from "./store/indexeddb-remote-backend";
 import { SyncState } from "./sync.api";
 import { EventTimelineSet } from "./models/event-timeline-set";
 import { VerificationRequest } from "./crypto/verification/request/VerificationRequest";
 import { Base as Verification } from "./crypto/verification/Base";
+import * as ContentHelpers from "./content-helpers";
 import {
     CrossSigningKey,
     IAddSecretStorageKeyOpts,
     ICreateSecretStorageOpts,
-    IEncryptedEventInfo, IImportOpts, IImportRoomKeysOpts,
-    IRecoveryKey, ISecretStorageKey
+    IEncryptedEventInfo,
+    IImportRoomKeysOpts,
+    IRecoveryKey,
+    ISecretStorageKey
 } from "./crypto/api";
 import { CrossSigningInfo, UserTrustLevel } from "./crypto/CrossSigning";
 import { Room } from "./models/Room";
+import { IJoinRoomOpts, IRedactOpts, ISendEventResponse } from "./@types/requests";
+import { EventType } from "./@types/event";
+import { IImageInfo } from "./@types/partials";
 
 export type Store = StubStore | MemoryStore | LocalIndexedDBStoreBackend | RemoteIndexedDBStoreBackend;
 
 export type CryptoStore = MemoryCryptoStore | LocalStorageCryptoStore | IndexedDBCryptoStore;
 
-export type Callback = (err: Error | any | null, data: any) => void;
+export type Callback = (err: Error | any | null, data?: any) => void;
 
 const SCROLLBACK_DELAY_MS = 3000;
 export const CRYPTO_ENABLED: boolean = isCryptoAvailable();
@@ -383,7 +373,7 @@ export class MatrixClient extends EventEmitter {
             this.scheduler.setProcessFunction(async (eventToSend) => {
                 const room = this.getRoom(eventToSend.getRoomId());
                 if (eventToSend.status !== EventStatus.SENDING) {
-                    updatePendingEventStatus(room, eventToSend, EventStatus.SENDING);
+                    this.updatePendingEventStatus(room, eventToSend, EventStatus.SENDING);
                 }
                 const res = await sendEventHttpRequest(this, eventToSend);
                 if (room) {
@@ -2428,5 +2418,810 @@ export class MatrixClient extends EventEmitter {
             },
         );
     }
+
+    /**
+     * Get the room for the given room ID.
+     * This function will return a valid room for any room for which a Room event
+     * has been emitted. Note in particular that other events, eg. RoomState.members
+     * will be emitted for a room before this function will return the given room.
+     * @param {string} roomId The room ID
+     * @return {Room} The Room or null if it doesn't exist or there is no data store.
+     */
+    public getRoom(roomId: string): Room {
+        return this.store.getRoom(roomId);
+    }
+
+    /**
+     * Retrieve all known rooms.
+     * @return {Room[]} A list of rooms, or an empty list if there is no data store.
+     */
+    public getRooms(): Room[] {
+        return this.store.getRooms();
+    }
+
+    /**
+     * Retrieve all rooms that should be displayed to the user
+     * This is essentially getRooms() with some rooms filtered out, eg. old versions
+     * of rooms that have been replaced or (in future) other rooms that have been
+     * marked at the protocol level as not to be displayed to the user.
+     * @return {Room[]} A list of rooms, or an empty list if there is no data store.
+     */
+    public getVisibleRooms(): Room[] {
+        const allRooms = this.store.getRooms();
+
+        const replacedRooms = new Set();
+        for (const r of allRooms) {
+            const createEvent = r.currentState.getStateEvents('m.room.create', '');
+            // invites are included in this list and we don't know their create events yet
+            if (createEvent) {
+                const predecessor = createEvent.getContent()['predecessor'];
+                if (predecessor && predecessor['room_id']) {
+                    replacedRooms.add(predecessor['room_id']);
+                }
+            }
+        }
+
+        return allRooms.filter((r) => {
+            const tombstone = r.currentState.getStateEvents('m.room.tombstone', '');
+            if (tombstone && replacedRooms.has(r.roomId)) {
+                return false;
+            }
+            return true;
+        });
+    }
+
+    /**
+     * Retrieve a user.
+     * @param {string} userId The user ID to retrieve.
+     * @return {?User} A user or null if there is no data store or the user does
+     * not exist.
+     */
+    public getUser(userId: string): User {
+        return this.store.getUser(userId);
+    }
+
+    /**
+     * Retrieve all known users.
+     * @return {User[]} A list of users, or an empty list if there is no data store.
+     */
+    public getUsers(): User[] {
+        return this.store.getUsers();
+    }
+
+    /**
+     * Set account data event for the current user.
+     * It will retry the request up to 5 times.
+     * @param {string} eventType The event type
+     * @param {Object} content the contents object for the event
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public setAccountData(eventType: string, content: any, callback?: Callback): Promise<void> {
+        const path = utils.encodeUri("/user/$userId/account_data/$type", {
+            $userId: this.credentials.userId,
+            $type: eventType,
+        });
+        const promise = retryNetworkOperation(5, () => {
+            return this.http.authedRequest(undefined, "PUT", path, undefined, content);
+        });
+        if (callback) {
+            promise.then(result => callback(null, result), callback);
+        }
+        return promise;
+    }
+
+    /**
+     * Get account data event of given type for the current user.
+     * @param {string} eventType The event type
+     * @return {?object} The contents of the given account data event
+     */
+    public getAccountData(eventType: string): any {
+        return this.store.getAccountData(eventType);
+    }
+
+    /**
+     * Get account data event of given type for the current user. This variant
+     * gets account data directly from the homeserver if the local store is not
+     * ready, which can be useful very early in startup before the initial sync.
+     * @param {string} eventType The event type
+     * @return {Promise} Resolves: The contents of the given account
+     * data event.
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public async getAccountDataFromServer(eventType: string): Promise<any> {
+        if (this.isInitialSyncComplete()) {
+            const event = this.store.getAccountData(eventType);
+            if (!event) {
+                return null;
+            }
+            // The network version below returns just the content, so this branch
+            // does the same to match.
+            return event.getContent();
+        }
+        const path = utils.encodeUri("/user/$userId/account_data/$type", {
+            $userId: this.credentials.userId,
+            $type: eventType,
+        });
+        try {
+            return await this.http.authedRequest(
+                undefined, "GET", path, undefined,
+            );
+        } catch (e) {
+            if (e.data && e.data.errcode === 'M_NOT_FOUND') {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Gets the users that are ignored by this client
+     * @returns {string[]} The array of users that are ignored (empty if none)
+     */
+    public getIgnoredUsers(): string[] {
+        const event = this.getAccountData("m.ignored_user_list");
+        if (!event || !event.getContent() || !event.getContent()["ignored_users"]) return [];
+        return Object.keys(event.getContent()["ignored_users"]);
+    }
+
+    /**
+     * Sets the users that the current user should ignore.
+     * @param {string[]} userIds the user IDs to ignore
+     * @param {module:client.callback} [callback] Optional.
+     * @return {Promise} Resolves: Account data event
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public setIgnoredUsers(userIds: string[], callback?: Callback): Promise<any> {
+        const content = { ignored_users: {} };
+        userIds.map((u) => content.ignored_users[u] = {});
+        return this.setAccountData("m.ignored_user_list", content, callback);
+    }
+
+    /**
+     * Gets whether or not a specific user is being ignored by this client.
+     * @param {string} userId the user ID to check
+     * @returns {boolean} true if the user is ignored, false otherwise
+     */
+    public isUserIgnored(userId: string): boolean {
+        return this.getIgnoredUsers().includes(userId);
+    }
+
+    /**
+     * Join a room. If you have already joined the room, this will no-op.
+     * @param {string} roomIdOrAlias The room ID or room alias to join.
+     * @param {Object} opts Options when joining the room.
+     * @param {boolean} opts.syncRoom True to do a room initial sync on the resulting
+     * room. If false, the <strong>returned Room object will have no current state.
+     * </strong> Default: true.
+     * @param {boolean} opts.inviteSignUrl If the caller has a keypair 3pid invite, the signing URL is passed in this parameter.
+     * @param {string[]} opts.viaServers The server names to try and join through in addition to those that are automatically chosen.
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: Room object.
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public async joinRoom(roomIdOrAlias: string, opts: IJoinRoomOpts, callback?: Callback): Promise<Room> {
+        // to help people when upgrading..
+        if (utils.isFunction(opts)) {
+            throw new Error("Expected 'opts' object, got function.");
+        }
+        opts = opts || {};
+        if (opts.syncRoom === undefined) {
+            opts.syncRoom = true;
+        }
+
+        const room = this.getRoom(roomIdOrAlias);
+        if (room && room.hasMembershipState(this.credentials.userId, "join")) {
+            return Promise.resolve(room);
+        }
+
+        let signPromise = Promise.resolve();
+
+        if (opts.inviteSignUrl) {
+            signPromise = this.http.requestOtherUrl(
+                undefined, 'POST',
+                opts.inviteSignUrl, { mxid: this.credentials.userId },
+            );
+        }
+
+        const queryString = {};
+        if (opts.viaServers) {
+            queryString["server_name"] = opts.viaServers;
+        }
+
+        const reqOpts = { qsStringifyOptions: { arrayFormat: 'repeat' } };
+
+        try {
+            const data: any = {};
+            const signedInviteObj = await signPromise;
+            if (signedInviteObj) {
+                data['third_party_signed'] = signedInviteObj;
+            }
+
+            const path = utils.encodeUri("/join/$roomid", {$roomid: roomIdOrAlias});
+            const res = await this.http.authedRequest(undefined, "POST", path, queryString, data, reqOpts);
+
+            const roomId = res['room_id'];
+            const syncApi = new SyncApi(this, this.clientOpts);
+            const room = syncApi.createRoom(roomId);
+            if (opts.syncRoom) {
+                // v2 will do this for us
+                // return syncApi.syncRoom(room);
+            }
+            callback?.(null, room);
+            return room;
+        } catch (e) {
+            callback?.(e);
+            throw e; // rethrow for reject
+        }
+    }
+
+    /**
+     * Resend an event.
+     * @param {MatrixEvent} event The event to resend.
+     * @param {Room} room Optional. The room the event is in. Will update the
+     * timeline entry if provided.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public resendEvent(event: MatrixEvent, room: Room): Promise<void> {
+        this.updatePendingEventStatus(room, event, EventStatus.SENDING);
+        return this.sendEvent(room, event);
+    }
+
+    /**
+     * Cancel a queued or unsent event.
+     *
+     * @param {MatrixEvent} event   Event to cancel
+     * @throws Error if the event is not in QUEUED or NOT_SENT state
+     */
+    public cancelPendingEvent(event: MatrixEvent) {
+        if ([EventStatus.QUEUED, EventStatus.NOT_SENT].indexOf(event.status) < 0) {
+            throw new Error("cannot cancel an event with status " + event.status);
+        }
+
+        // first tell the scheduler to forget about it, if it's queued
+        if (this.scheduler) {
+            this.scheduler.removeEventFromQueue(event);
+        }
+
+        // then tell the room about the change of state, which will remove it
+        // from the room's list of pending events.
+        const room = this.getRoom(event.getRoomId());
+        this.updatePendingEventStatus(room, event, EventStatus.CANCELLED);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} name
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public setRoomName(roomId: string, name: string, callback?: Callback): Promise<void> {
+        return this.sendStateEvent(roomId, "m.room.name", { name: name }, undefined, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} topic
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public setRoomTopic(roomId: string, topic: string, callback?: Callback): Promise<void> {
+        return this.sendStateEvent(roomId, "m.room.topic", { topic: topic }, undefined, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public getRoomTags(roomId: string, callback?: Callback): Promise<unknown> { // TODO: Types
+        const path = utils.encodeUri("/user/$userId/rooms/$roomId/tags/", {
+            $userId: this.credentials.userId,
+            $roomId: roomId,
+        });
+        return this.http.authedRequest(
+            callback, "GET", path, undefined,
+        );
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} tagName name of room tag to be set
+     * @param {object} metadata associated with that tag to be stored
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public setRoomTag(roomId: string, tagName: string, metadata: any, callback?: Callback): Promise<unknown> { // TODO: Types
+        const path = utils.encodeUri("/user/$userId/rooms/$roomId/tags/$tag", {
+            $userId: this.credentials.userId,
+            $roomId: roomId,
+            $tag: tagName,
+        });
+        return this.http.authedRequest(
+            callback, "PUT", path, undefined, metadata,
+        );
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} tagName name of room tag to be removed
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public deleteRoomTag(roomId: string, tagName: string, callback?: Callback): Promise<void> {
+        const path = utils.encodeUri("/user/$userId/rooms/$roomId/tags/$tag", {
+            $userId: this.credentials.userId,
+            $roomId: roomId,
+            $tag: tagName,
+        });
+        return this.http.authedRequest(
+            callback, "DELETE", path, undefined, undefined,
+        );
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} eventType event type to be set
+     * @param {object} content event content
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public setRoomAccountData(roomId: string, eventType: string, content: any, callback?: Callback): Promise<void> {
+        const path = utils.encodeUri("/user/$userId/rooms/$roomId/account_data/$type", {
+            $userId: this.credentials.userId,
+            $roomId: roomId,
+            $type: eventType,
+        });
+        return this.http.authedRequest(
+            callback, "PUT", path, undefined, content,
+        );
+    }
+
+    /**
+     * Set a user's power level.
+     * @param {string} roomId
+     * @param {string} userId
+     * @param {Number} powerLevel
+     * @param {MatrixEvent} event
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public setPowerLevel(roomId: string, userId: string, powerLevel: number, event: MatrixEvent, callback?: Callback): Promise<void> {
+        let content = {
+            users: {},
+        };
+        if (event && event.getType() === "m.room.power_levels") {
+            // take a copy of the content to ensure we don't corrupt
+            // existing client state with a failed power level change
+            content = utils.deepCopy(event.getContent());
+        }
+        content.users[userId] = powerLevel;
+        const path = utils.encodeUri("/rooms/$roomId/state/m.room.power_levels", {
+            $roomId: roomId,
+        });
+        return this.http.authedRequest(
+            callback, "PUT", path, undefined, content,
+        );
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} eventType
+     * @param {Object} content
+     * @param {string} txnId Optional.
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendEvent(roomId: string, eventType: string, content: any, txnId?: string, callback?: Callback): Promise<ISendEventResponse> {
+        return this.sendCompleteEvent(roomId, {type: eventType, content}, txnId, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {object} eventObject An object with the partial structure of an event, to which event_id, user_id, room_id and origin_server_ts will be added.
+     * @param {string} txnId the txnId.
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    private sendCompleteEvent(roomId: string, eventObject: any, txnId: string, callback?: Callback): Promise<ISendEventResponse> {
+        if (utils.isFunction(txnId)) {
+            callback = txnId as any as Callback; // convert for legacy
+            txnId = undefined;
+        }
+
+        if (!txnId) {
+            txnId = this.makeTxnId();
+        }
+
+        // we always construct a MatrixEvent when sending because the store and
+        // scheduler use them. We'll extract the params back out if it turns out
+        // the client has no scheduler or store.
+        const localEvent = new MatrixEvent(Object.assign(eventObject, {
+            event_id: "~" + roomId + ":" + txnId,
+            user_id: this.credentials.userId,
+            sender: this.credentials.userId,
+            room_id: roomId,
+            origin_server_ts: new Date().getTime(),
+        }));
+
+        const room = this.getRoom(roomId);
+
+        // if this is a relation or redaction of an event
+        // that hasn't been sent yet (e.g. with a local id starting with a ~)
+        // then listen for the remote echo of that event so that by the time
+        // this event does get sent, we have the correct event_id
+        const targetId = localEvent.getAssociatedId();
+        if (targetId && targetId.startsWith("~")) {
+            const target = room.getPendingEvents().find(e => e.getId() === targetId);
+            target.once("Event.localEventIdReplaced", () => {
+                localEvent.updateAssociatedId(target.getId());
+            });
+        }
+
+        const type = localEvent.getType();
+        logger.log(`sendEvent of type ${type} in ${roomId} with txnId ${txnId}`);
+
+        localEvent.setTxnId(txnId);
+        localEvent.setStatus(EventStatus.SENDING);
+
+        // add this event immediately to the local store as 'sending'.
+        if (room) {
+            room.addPendingEvent(localEvent, txnId);
+        }
+
+        // addPendingEvent can change the state to NOT_SENT if it believes
+        // that there's other events that have failed. We won't bother to
+        // try sending the event if the state has changed as such.
+        if (localEvent.status === EventStatus.NOT_SENT) {
+            return Promise.reject(new Error("Event blocked by other events not yet sent"));
+        }
+
+        return this.encryptAndSendEvent(room, localEvent, callback);
+    }
+
+    /**
+     * encrypts the event if necessary; adds the event to the queue, or sends it; marks the event as sent/unsent
+     * @param room
+     * @param event
+     * @param callback
+     * @returns {Promise} returns a promise which resolves with the result of the send request
+     * @private
+     */
+    private encryptAndSendEvent(room: Room, event: MatrixEvent, callback?: Callback): Promise<ISendEventResponse> {
+        // Add an extra Promise.resolve() to turn synchronous exceptions into promise rejections,
+        // so that we can handle synchronous and asynchronous exceptions with the
+        // same code path.
+        return Promise.resolve().then(() => {
+            const encryptionPromise = this.encryptEventIfNeeded(event, room);
+            if (!encryptionPromise) return null;
+
+            this.updatePendingEventStatus(room, event, EventStatus.ENCRYPTING);
+            return encryptionPromise.then(() => this.updatePendingEventStatus(room, event, EventStatus.SENDING));
+        }).then(() => {
+            let promise: Promise<ISendEventResponse>;
+            if (this.scheduler) {
+                // if this returns a promise then the scheduler has control now and will
+                // resolve/reject when it is done. Internally, the scheduler will invoke
+                // processFn which is set to this._sendEventHttpRequest so the same code
+                // path is executed regardless.
+                promise = this.scheduler.queueEvent(event);
+                if (promise && this.scheduler.getQueueForEvent(event).length > 1) {
+                    // event is processed FIFO so if the length is 2 or more we know
+                    // this event is stuck behind an earlier event.
+                    this.updatePendingEventStatus(room, event, EventStatus.QUEUED);
+                }
+            }
+
+            if (!promise) {
+                promise = this.sendEventHttpRequest(event);
+                if (room) {
+                    promise = promise.then(res => {
+                        room.updatePendingEvent(event, EventStatus.SENT, res['event_id']);
+                        return res;
+                    });
+                }
+            }
+
+            return promise;
+        }).then(res => {
+            callback?.(null, res);
+            return res;
+        }).catch(err => {
+            logger.error("Error sending event", err.stack || err);
+            try {
+                // set the error on the event before we update the status:
+                // updating the status emits the event, so the state should be
+                // consistent at that point.
+                event.error = err;
+                this.updatePendingEventStatus(room, event, EventStatus.NOT_SENT);
+                // also put the event object on the error: the caller will need this
+                // to resend or cancel the event
+                err.event = event;
+
+                callback?.(err);
+            } catch (e) {
+                logger.error("Exception in error handler!", e.stack || err);
+            }
+            throw err;
+        });
+    }
+
+    private encryptEventIfNeeded(event: MatrixEvent, room?: Room): Promise<void> | null {
+        if (event.isEncrypted()) {
+            // this event has already been encrypted; this happens if the
+            // encryption step succeeded, but the send step failed on the first
+            // attempt.
+            return null;
+        }
+
+        if (!this.isRoomEncrypted(event.getRoomId())) {
+            return null;
+        }
+
+        if (!this.crypto && this.usingExternalCrypto) {
+            // The client has opted to allow sending messages to encrypted
+            // rooms even if the room is encrypted, and we haven't setup
+            // crypto. This is useful for users of matrix-org/pantalaimon
+            return null;
+        }
+
+        if (event.getType() === EventType.Reaction) {
+            // For reactions, there is a very little gained by encrypting the entire
+            // event, as relation data is already kept in the clear. Event
+            // encryption for a reaction effectively only obscures the event type,
+            // but the purpose is still obvious from the relation data, so nothing
+            // is really gained. It also causes quite a few problems, such as:
+            //   * triggers notifications via default push rules
+            //   * prevents server-side bundling for reactions
+            // The reaction key / content / emoji value does warrant encrypting, but
+            // this will be handled separately by encrypting just this value.
+            // See https://github.com/matrix-org/matrix-doc/pull/1849#pullrequestreview-248763642
+            return null;
+        }
+
+        if (!this.crypto) {
+            throw new Error(
+                "This room is configured to use encryption, but your client does " +
+                "not support encryption.",
+            );
+        }
+
+        return this.crypto.encryptEvent(event, room);
+    }
+
+    /**
+     * Returns the eventType that should be used taking encryption into account
+     * for a given eventType.
+     * @param {MatrixClient} client the client
+     * @param {string} roomId the room for the events `eventType` relates to
+     * @param {string} eventType the event type
+     * @return {string} the event type taking encryption into account
+     */
+    private getEncryptedIfNeededEventType(roomId: string, eventType: string): string {
+        if (eventType === EventType.Reaction) return eventType;
+        return this.isRoomEncrypted(roomId) ? EventType.RoomMessageEncrypted : eventType;
+    }
+
+    private updatePendingEventStatus(room: Room | null, event: MatrixEvent, newStatus: EventStatus) {
+        if (room) {
+            room.updatePendingEvent(event, newStatus);
+        } else {
+            event.setStatus(newStatus);
+        }
+    }
+
+    private sendEventHttpRequest(event: MatrixEvent): Promise<ISendEventResponse> {
+        let txnId = event.getTxnId();
+        if (!txnId) {
+            txnId = this.makeTxnId();
+            event.setTxnId(txnId);
+        }
+
+
+        const pathParams = {
+            $roomId: event.getRoomId(),
+            $eventType: event.getWireType(),
+            $stateKey: event.getStateKey(),
+            $txnId: txnId,
+        };
+
+        let path;
+
+        if (event.isState()) {
+            let pathTemplate = "/rooms/$roomId/state/$eventType";
+            if (event.getStateKey() && event.getStateKey().length > 0) {
+                pathTemplate = "/rooms/$roomId/state/$eventType/$stateKey";
+            }
+            path = utils.encodeUri(pathTemplate, pathParams);
+        } else if (event.isRedaction()) {
+            const pathTemplate = `/rooms/$roomId/redact/$redactsEventId/$txnId`;
+            path = utils.encodeUri(pathTemplate, Object.assign({
+                $redactsEventId: event.event.redacts,
+            }, pathParams));
+        } else {
+            path = utils.encodeUri("/rooms/$roomId/send/$eventType/$txnId", pathParams);
+        }
+
+        return this.http.authedRequest(
+            undefined, "PUT", path, undefined, event.getWireContent(),
+        ).then((res) => {
+            logger.log(`Event sent to ${event.getRoomId()} with event id ${res.event_id}`);
+            return res;
+        });
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} eventId
+     * @param {string} [txnId]  transaction id. One will be made up if not
+     *    supplied.
+     * @param {object|module:client.callback} cbOrOpts
+     *    Options to pass on, may contain `reason`.
+     *    Can be callback for backwards compatibility.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public redactEvent(roomId: string, eventId: string, txnId?: string, cbOrOpts?: Callback | IRedactOpts): Promise<ISendEventResponse> {
+        const opts = typeof(cbOrOpts) === 'object' ? cbOrOpts : {};
+        const reason = opts.reason;
+        const callback = typeof(cbOrOpts) === 'function' ? cbOrOpts : undefined;
+        return this.sendCompleteEvent(roomId, {
+            type: EventType.RoomRedaction,
+            content: { reason: reason },
+            redacts: eventId,
+        }, txnId, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {Object} content
+     * @param {string} txnId Optional.
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendMessage(roomId: string, content: any, txnId: string, callback?: Callback): Promise<ISendEventResponse> {
+        if (utils.isFunction(txnId)) {
+            callback = txnId as any as Callback; // for legacy
+            txnId = undefined;
+        }
+        return this.sendEvent(roomId, "m.room.message", content, txnId, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} body
+     * @param {string} txnId Optional.
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendTextMessage(roomId: string, body: string, txnId?: string, callback?: Callback): Promise<ISendEventResponse> {
+        const content = ContentHelpers.makeTextMessage(body);
+        return this.sendMessage(roomId, content, txnId, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} body
+     * @param {string} txnId Optional.
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendNotice(roomId: string, body: string, txnId?: string, callback?: Callback): Promise<ISendEventResponse> {
+        const content = ContentHelpers.makeNotice(body);
+        return this.sendMessage(roomId, content, txnId, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} body
+     * @param {string} txnId Optional.
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendEmoteMessage(roomId: string, body: string, txnId?: string, callback?: Callback): Promise<ISendEventResponse> {
+        const content = ContentHelpers.makeEmoteMessage(body);
+        return this.sendMessage(roomId, content, txnId, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} url
+     * @param {Object} info
+     * @param {string} text
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendImageMessage(roomId: string, url: string, info?: IImageInfo, text = "Image", callback?: Callback): Promise<ISendEventResponse> {
+        if (utils.isFunction(text)) {
+            callback = text as any as Callback; // legacy
+            text = undefined;
+        }
+        const content = {
+            msgtype: "m.image",
+            url: url,
+            info: info,
+            body: text,
+        };
+        return this.sendMessage(roomId, content, undefined, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} url
+     * @param {Object} info
+     * @param {string} text
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendStickerMessage(roomId: string, url: string, info?: IImageInfo, text = "Sticker", callback?: Callback): Promise<ISendEventResponse> {
+        if (utils.isFunction(text)) {
+            callback = text as any as Callback; // legacy
+            text = undefined;
+        }
+        const content = {
+            url: url,
+            info: info,
+            body: text,
+        };
+        return this.sendEvent(roomId, EventType.Sticker, content, undefined, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} body
+     * @param {string} htmlBody
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendHtmlMessage(roomId: string, body: string, htmlBody: string, callback?: Callback): Promise<ISendEventResponse> {
+        const content = ContentHelpers.makeHtmlMessage(body, htmlBody);
+        return this.sendMessage(roomId, content, undefined, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} body
+     * @param {string} htmlBody
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendHtmlNotice(roomId: string, body: string, htmlBody: string, callback?: Callback): Promise<ISendEventResponse> {
+        const content = ContentHelpers.makeHtmlNotice(body, htmlBody);
+        return this.sendMessage(roomId, content, undefined, callback);
+    }
+
+    /**
+     * @param {string} roomId
+     * @param {string} body
+     * @param {string} htmlBody
+     * @param {module:client.callback} callback Optional.
+     * @return {Promise} Resolves: TODO
+     * @return {module:http-api.MatrixError} Rejects: with an error response.
+     */
+    public sendHtmlEmote(roomId: string, body: string, htmlBody: string, callback?: Callback): Promise<ISendEventResponse> {
+        const content = ContentHelpers.makeHtmlEmote(body, htmlBody);
+        return this.sendMessage(roomId, content, undefined, callback);
+    }
+
+    // sendReceipt
 }
 
