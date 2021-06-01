@@ -41,3 +41,27 @@ export interface ISendEventResponse {
     event_id: string;
 }
 
+export interface IPresenceOpts {
+    presence: "online" | "offline" | "unavailable";
+    status_msg?: string;
+}
+
+export interface IPaginateOpts {
+    backwards?: boolean;
+    limit?: number;
+}
+
+export interface IGuestAccessOpts {
+    allowJoin: boolean;
+    allowRead: boolean;
+}
+
+export interface ISearchOpts {
+    keys?: string[];
+    query: string;
+}
+
+export interface IEventSearchOpts {
+    filter: any; // TODO: Types
+    term: string;
+}

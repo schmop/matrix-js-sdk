@@ -3672,7 +3672,7 @@ MatrixClient.prototype.forget = function(roomId, deleteRoom, callback) {
 MatrixClient.prototype.unban = function(roomId, userId, callback) {
     // unbanning != set their state to leave: this used to be
     // the case, but was then changed so that leaving was always
-    // a revoking of priviledge, otherwise two people racing to
+    // a revoking of privilege, otherwise two people racing to
     // kick / ban someone could end up banning and then un-banning
     // them.
     const path = utils.encodeUri("/rooms/$roomId/unban", {
@@ -5145,35 +5145,6 @@ MatrixClient.prototype.deactivateSynapseUser = function(userId) {
  * via {@link module:client~MatrixClient#on}. Alternatively, listen for specific
  * state change events.
  * @param {Object=} opts Options to apply when syncing.
- * @param {Number=} opts.initialSyncLimit The event <code>limit=</code> to apply
- * to initial sync. Default: 8.
- * @param {Boolean=} opts.includeArchivedRooms True to put <code>archived=true</code>
- * on the <code>/initialSync</code> request. Default: false.
- * @param {Boolean=} opts.resolveInvitesToProfiles True to do /profile requests
- * on every invite event if the displayname/avatar_url is not known for this user ID.
- * Default: false.
- *
- * @param {String=} opts.pendingEventOrdering Controls where pending messages
- * appear in a room's timeline. If "<b>chronological</b>", messages will appear
- * in the timeline when the call to <code>sendEvent</code> was made. If
- * "<b>detached</b>", pending messages will appear in a separate list,
- * accessbile via {@link module:models/room#getPendingEvents}. Default:
- * "chronological".
- *
- * @param {Number=} opts.pollTimeout The number of milliseconds to wait on /sync.
- * Default: 30000 (30 seconds).
- *
- * @param {Filter=} opts.filter The filter to apply to /sync calls. This will override
- * the opts.initialSyncLimit, which would normally result in a timeline limit filter.
- *
- * @param {Boolean=} opts.disablePresence True to perform syncing without automatically
- * updating presence.
- * @param {Boolean=} opts.lazyLoadMembers True to not load all membership events during
- * initial sync but fetch them when needed by calling `loadOutOfBandMembers`
- * This will override the filter option at this moment.
- * @param {Number=} opts.clientWellKnownPollPeriod The number of seconds between polls
- * to /.well-known/matrix/client, undefined to disable. This should be in the order of hours.
- * Default: undefined.
  */
 MatrixClient.prototype.startClient = async function(opts) {
     if (this.clientRunning) {
@@ -5260,7 +5231,8 @@ MatrixClient.prototype.waitForClientWellKnown = function() {
  * to know in the next session what flags the sync data was
  * created with (e.g. lazy loading)
  * @param {object} opts the complete set of client options
- * @return {Promise} for store operation */
+ * @return {Promise} for store operation
+ */
 MatrixClient.prototype._storeClientOptions = function() {
     const primTypes = ["boolean", "string", "number"];
     const serializableOpts = Object.entries(this._clientOpts)
